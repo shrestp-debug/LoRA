@@ -162,6 +162,15 @@ def main():
                 if args.method == "safelora":
                     n = apply_safelora_projection_persistent(model, v)
                     logger.info(f"[SafeLoRA-adapted-v2] Persisted projection into {n} modules.")
+                    
+                    # --- STEP 5: ADAM MOMENTUM RESET ---
+                    # Reset momentum since SVD drastically alters the factor matrices
+                    for p in model.parameters():
+                        if p in optimizer.state:
+                            optimizer.state[p]['exp_avg'].zero_()
+                            optimizer.state[p]['exp_avg_sq'].zero_()
+                    logger.info("Reset Adam momentum states due to SafeLoRA SVD factorization.")
+                    
                     eval_cm = contextlib.nullcontext()  # weights already safe, no revert needed
                 else:
                     eval_cm = contextlib.nullcontext()
