@@ -308,6 +308,7 @@ def parse_agent_response(
         return fallback_result
 
     new_lambda_state = dict(current_lambda_state)
+    MAX_LAMBDA_DELTA = 0.15  # hard cap, matches the system prompt's stated max
 
     for key, val in raw_constraints.items():
         matched_ids = [v_id for v_id in valid_layer_ids if key == v_id or key in v_id]
@@ -323,7 +324,18 @@ def parse_agent_response(
 
         clamped = max(0.0, min(1.0, lam))
         for matched_id in matched_ids:
-            new_lambda_state[matched_id] = clamped
+            current_val = current_lambda_state.get(matched_id, 0.0)
+            delta = clamped - current_val
+            if abs(delta) > MAX_LAMBDA_DELTA:
+                clamped_delta = MAX_LAMBDA_DELTA if delta > 0 else -MAX_LAMBDA_DELTA
+                enforced = current_val + clamped_delta
+                logger.warning(
+                    f"λ jump clamped for {matched_id}: requested {current_val:.3f}→{clamped:.3f} "
+                    f"(Δ={delta:+.3f}), enforced Δ={clamped_delta:+.3f} → {enforced:.3f}"
+                )
+                new_lambda_state[matched_id] = enforced
+            else:
+                new_lambda_state[matched_id] = clamped
 
     rationale = str(parsed.get("rationale", "No rationale provided."))[:300]
     predicted_outcome = str(parsed.get("predicted_outcome", "Not specified."))[:200]

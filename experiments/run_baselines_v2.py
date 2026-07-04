@@ -43,7 +43,7 @@ from src.dataset_loader import (
 from src.metrics import evaluate_task_gsm8k, evaluate_task_alpaca, evaluate_safety
 from src.baselines_v2 import (
     apply_write_side_hook_constraint,
-    safelora_eval_context,
+    apply_safelora_projection_persistent,
     log_write_side_hook_stats,
     load_global_safety_direction,
 )
@@ -160,7 +160,9 @@ def main():
                 logger.info(f"--- Running Evaluation at Step {current_step} ---")
 
                 if args.method == "safelora":
-                    eval_cm = safelora_eval_context(model, v)
+                    n = apply_safelora_projection_persistent(model, v)
+                    logger.info(f"[SafeLoRA-adapted-v2] Persisted projection into {n} modules.")
+                    eval_cm = contextlib.nullcontext()  # weights already safe, no revert needed
                 else:
                     eval_cm = contextlib.nullcontext()
 

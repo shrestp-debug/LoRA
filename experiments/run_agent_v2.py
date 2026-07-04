@@ -312,6 +312,13 @@ def main():
                 applier.set_all_lambdas(parsed["layer_constraints"])
                 applier.apply_projection()
 
+                jump_log = applier.get_svd_jump_log()
+                if jump_log:
+                    pd.DataFrame(jump_log).to_csv(
+                        results_dir / f"agent_v2_{args.task}_seed{args.seed}_svdjumps_step{current_step}.csv",
+                        index=False
+                    )
+
                 reflexion_memory.add_pending(
                     step=current_step,
                     lambda_decisions=parsed["layer_constraints"],

@@ -152,3 +152,40 @@ def load_global_safety_direction(models_dir):
 
     v = torch.load(path, map_location="cpu")
     return v / v.norm()
+
+def apply_safelora_projection_persistent(model, v):
+    """
+    Persists the write-side SafeLoRA projection into the trained adapter
+    weights (not just an eval-time hypothetical). Call this at each
+    checkpoint, same cadence as ConstraintApplierV2.apply_projection().
+
+    ΔW_safe = ΔW - v vᵀ ΔW   (lambda fixed at 1.0 — full projection,
+    matching the "periodic SafeLoRA" mechanism)
+    """
+    n_applied = 0
+    for name, module in model.named_modules():
+        if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+            adapter_name = "default"
+            if adapter_name not in module.lora_A:
+                continue
+
+            with torch.no_grad():
+                A = module.lora_A[adapter_name].weight.detach().to(torch.float32)
+                B = module.lora_B[adapter_name].weight.detach().to(torch.float32)
+                scaling = module.scaling.get(adapter_name, 1.0)
+                delta_W = (B @ A) * scaling
+
+                v_dev = v.to(device=delta_W.device, dtype=torch.float32)
+                proj = torch.outer(v_dev, v_dev @ delta_W)
+                delta_W_safe = delta_W - proj
+
+                target_W = delta_W_safe / scaling
+                r = A.shape[0]
+                U_svd, S_svd, Vh_svd = torch.linalg.svd(target_W, full_matrices=False)
+                new_B = U_svd[:, :r] * torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(0)
+                new_A = torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(1) * Vh_svd[:r, :]
+
+                module.lora_B[adapter_name].weight.data.copy_(new_B.to(module.lora_B[adapter_name].weight.dtype))
+                module.lora_A[adapter_name].weight.data.copy_(new_A.to(module.lora_A[adapter_name].weight.dtype))
+            n_applied += 1
+    return n_applied

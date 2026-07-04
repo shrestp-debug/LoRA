@@ -62,7 +62,22 @@ class ConstraintApplierV2:
                 U_svd, S_svd, Vh_svd = torch.linalg.svd(target_W, full_matrices=False)
                 new_B = U_svd[:, :r] * torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(0)
                 new_A = torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(1) * Vh_svd[:r, :]
+
+                # --- DIAGNOSTIC: log discontinuity magnitude vs lambda change ---
+                delta_A_norm = torch.norm(new_A.to(A.dtype) - A).item()
+                delta_B_norm = torch.norm(new_B.to(B.dtype) - B).item()
+                if not hasattr(self, "_svd_jump_log"):
+                    self._svd_jump_log = []
+                self._svd_jump_log.append({
+                    "key": key, "lambda": lam,
+                    "delta_A_norm": delta_A_norm, "delta_B_norm": delta_B_norm,
+                })
+                # -----------------------------------------------------------
+
                 target.lora_B["default"].weight.data.copy_(new_B.to(target.lora_B["default"].weight.dtype))
                 target.lora_A["default"].weight.data.copy_(new_A.to(target.lora_A["default"].weight.dtype))
             n_applied += 1
         return n_applied
+
+    def get_svd_jump_log(self):
+        return getattr(self, "_svd_jump_log", [])
