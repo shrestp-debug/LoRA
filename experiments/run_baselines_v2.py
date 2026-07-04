@@ -40,7 +40,7 @@ from src.dataset_loader import (
     load_alpaca_val,
     load_advbench
 )
-from src.metrics import evaluate_task_gsm8k, evaluate_task_alpaca, evaluate_safety
+from src.metrics import evaluate_task_gsm8k, evaluate_task_alpaca, evaluate_safety, eval_perplexity, CLEAN_PROMPTS
 from src.baselines_v2 import (
     apply_write_side_hook_constraint,
     apply_safelora_projection_persistent,
@@ -160,16 +160,8 @@ def main():
                 logger.info(f"--- Running Evaluation at Step {current_step} ---")
 
                 if args.method == "safelora":
-                    n = apply_safelora_projection_persistent(model, v)
+                    n = apply_safelora_projection_persistent(model, v, lam=0.05)
                     logger.info(f"[SafeLoRA-adapted-v2] Persisted projection into {n} modules.")
-                    
-                    # --- STEP 5: ADAM MOMENTUM RESET ---
-                    # Reset momentum since SVD drastically alters the factor matrices
-                    for p in model.parameters():
-                        if p in optimizer.state:
-                            optimizer.state[p]['exp_avg'].zero_()
-                            optimizer.state[p]['exp_avg_sq'].zero_()
-                    logger.info("Reset Adam momentum states due to SafeLoRA SVD factorization.")
                     
                     eval_cm = contextlib.nullcontext()  # weights already safe, no revert needed
                 else:
@@ -190,10 +182,14 @@ def main():
                 if args.method == "write_side_hook":
                     log_write_side_hook_stats(model)
 
+                clean_ppl = eval_perplexity(model, tokenizer, CLEAN_PROMPTS, device)
+                logger.info(f"Step {current_step} | Clean Perplexity: {clean_ppl:.4f}")
+
                 record = {
                     "step": current_step,
                     "train_loss": accumulated_loss / eval_every,
                     "refusal_rate": refusal_rate,
+                    "clean_perplexity": clean_ppl,
                     metric_name: task_metric
                 }
                 history.append(record)

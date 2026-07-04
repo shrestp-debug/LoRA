@@ -24,8 +24,11 @@ from src.dataset_loader import (
     load_advbench,
 )
 from src.metrics import (
-    evaluate_task_gsm8k, evaluate_task_alpaca,
-    evaluate_safety
+    evaluate_task_gsm8k,
+    evaluate_task_alpaca,
+    evaluate_safety,
+    eval_perplexity,
+    CLEAN_PROMPTS
 )
 from src.baselines_v2 import load_global_safety_direction
 from experiments.train_vanilla_v2 import MaskedTrainingDataset, training_collate_fn, set_seed, build_lora_model
@@ -319,15 +322,6 @@ def main():
                         index=False
                     )
 
-                    # --- STEP 5: ADAM MOMENTUM RESET ---
-                    # SVD causes massive discontinuities in A/B factor matrices (norms > 5.0!). 
-                    # Stale momentum will violently throw weights off trajectory on the next step.
-                    for p in model.parameters():
-                        if p in optimizer.state:
-                            optimizer.state[p]['exp_avg'].zero_()
-                            optimizer.state[p]['exp_avg_sq'].zero_()
-                    logger.info("Reset Adam momentum states due to SVD factor discontinuities.")
-
                 reflexion_memory.add_pending(
                     step=current_step,
                     lambda_decisions=parsed["layer_constraints"],
@@ -338,6 +332,9 @@ def main():
                 lambda_state = applier.get_lambdas()
                 prev_refusal_rate = refusal_rate
 
+                clean_ppl = eval_perplexity(model, tokenizer, CLEAN_PROMPTS, device)
+                logger.info(f"Step {current_step} | Clean Perplexity: {clean_ppl:.4f}")
+
                 record = {
                     "step": current_step,
                     "train_loss": accumulated_loss / args.eval_every,
@@ -345,6 +342,7 @@ def main():
                     "refusal_rate_smoothed": smoothed_refusal,
                     "baseline_refusal_rate": baseline_refusal_rate,
                     metric_name: task_metric,
+                    "clean_perplexity": clean_ppl,
                     "mean_alignment": mean_align,
                 }
                 

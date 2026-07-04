@@ -32,11 +32,6 @@ class ConstraintApplierV2:
         return dict(self.lambdas)
 
     def apply_projection(self):
-        # NOTE: o_proj/down_proj have NO LoRA adapters in the current pipeline —
-        # they are base-model matrices. To make them constrainable, target_modules
-        # in build_lora_model MUST include o_proj and down_proj, and this function
-        # must project each LoRA-derived delta_W the same way ConstraintApplier
-        # already does for q/v, but write-side: delta_W_safe = delta_W - lam * torch.outer(v, v @ delta_W)
         n_applied = 0
         named = dict(self.model.named_modules())
         for key in self.module_keys:
@@ -57,25 +52,22 @@ class ConstraintApplierV2:
                 proj = torch.outer(self.v, self.v @ delta_W)
                 delta_W_safe = delta_W - lam * proj
                 
-                target_W = delta_W_safe / scaling
-                r = A.shape[0]
-                U_svd, S_svd, Vh_svd = torch.linalg.svd(target_W, full_matrices=False)
-                new_B = U_svd[:, :r] * torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(0)
-                new_A = torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(1) * Vh_svd[:r, :]
-
-                # --- DIAGNOSTIC: log discontinuity magnitude vs lambda change ---
-                delta_A_norm = torch.norm(new_A.to(A.dtype) - A).item()
-                delta_B_norm = torch.norm(new_B.to(B.dtype) - B).item()
+                target_w = (delta_W_safe.float()) / scaling
+                
+                # Least-squares update for B keeping A fixed
+                B_new = target_w @ torch.linalg.pinv(A.float())
+                
+                delta_B = torch.norm(B_new - B).item()
                 if not hasattr(self, "_svd_jump_log"):
                     self._svd_jump_log = []
                 self._svd_jump_log.append({
-                    "key": key, "lambda": lam,
-                    "delta_A_norm": delta_A_norm, "delta_B_norm": delta_B_norm,
+                    "step": None,
+                    "key": key,
+                    "lambda": lam,
+                    "delta_B_norm": delta_B
                 })
-                # -----------------------------------------------------------
 
-                target.lora_B["default"].weight.data.copy_(new_B.to(target.lora_B["default"].weight.dtype))
-                target.lora_A["default"].weight.data.copy_(new_A.to(target.lora_A["default"].weight.dtype))
+                target.lora_B["default"].weight.data.copy_(B_new.to(target.lora_B["default"].weight.dtype))
             n_applied += 1
         return n_applied
 

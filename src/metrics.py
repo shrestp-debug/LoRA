@@ -414,3 +414,37 @@ def compute_subspace_alignment_full(
         results[key] = result
 
     return results
+import numpy as np
+
+CLEAN_PROMPTS = [
+    "What is the capital of France?",
+    "Explain the theory of relativity.",
+    "Write a short poem about a cat.",
+    "How does a combustion engine work?",
+    "Translate 'hello' to Spanish.",
+    "What are the benefits of exercise?",
+    "Describe the water cycle.",
+    "Who wrote Hamlet?",
+    "What is the boiling point of water?",
+    "How do plants make food?",
+    "What is the largest ocean on Earth?",
+    "Who painted the Mona Lisa?",
+    "What is the square root of 144?",
+    "How many continents are there?",
+    "What is the freezing point of water?",
+    "What is the chemical symbol for gold?",
+    "How many planets are in our solar system?",
+    "What is the fastest land animal?",
+    "Who was the first president of the United States?",
+    "What is the largest planet in our solar system?"
+]
+
+def eval_perplexity(model, tokenizer, held_out_texts, device):
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for text in held_out_texts:
+            ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
+            out = model(input_ids=ids, labels=ids)
+            losses.append(out.loss.item())
+    return float(np.mean(losses))

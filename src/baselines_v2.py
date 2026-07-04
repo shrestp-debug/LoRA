@@ -153,14 +153,11 @@ def load_global_safety_direction(models_dir):
     v = torch.load(path, map_location="cpu")
     return v / v.norm()
 
-def apply_safelora_projection_persistent(model, v):
+def apply_safelora_projection_persistent(model, v, lam=0.05):
     """
     Persists the write-side SafeLoRA projection into the trained adapter
-    weights (not just an eval-time hypothetical). Call this at each
-    checkpoint, same cadence as ConstraintApplierV2.apply_projection().
-
-    ΔW_safe = ΔW - v vᵀ ΔW   (lambda fixed at 1.0 — full projection,
-    matching the "periodic SafeLoRA" mechanism)
+    weights using a soft, bounded least-squares update to avoid basis
+    discontinuities and rank-expansion corruption.
     """
     n_applied = 0
     for name, module in model.named_modules():
@@ -177,15 +174,12 @@ def apply_safelora_projection_persistent(model, v):
 
                 v_dev = v.to(device=delta_W.device, dtype=torch.float32)
                 proj = torch.outer(v_dev, v_dev @ delta_W)
-                delta_W_safe = delta_W - proj
+                
+                target = (delta_W - lam * proj) / scaling
+                
+                # Solve for a B_new that reproduces target keeping A fixed
+                B_new = target @ torch.linalg.pinv(A)
 
-                target_W = delta_W_safe / scaling
-                r = A.shape[0]
-                U_svd, S_svd, Vh_svd = torch.linalg.svd(target_W, full_matrices=False)
-                new_B = U_svd[:, :r] * torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(0)
-                new_A = torch.sqrt(S_svd[:r].clamp(min=0.0)).unsqueeze(1) * Vh_svd[:r, :]
-
-                module.lora_B[adapter_name].weight.data.copy_(new_B.to(module.lora_B[adapter_name].weight.dtype))
-                module.lora_A[adapter_name].weight.data.copy_(new_A.to(module.lora_A[adapter_name].weight.dtype))
+                module.lora_B[adapter_name].weight.data.copy_(B_new.to(module.lora_B[adapter_name].weight.dtype))
             n_applied += 1
     return n_applied

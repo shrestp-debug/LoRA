@@ -24,8 +24,11 @@ from src.dataset_loader import (
     load_advbench,
 )
 from src.metrics import (
-    evaluate_task_gsm8k, evaluate_task_alpaca,
-    evaluate_safety
+    evaluate_task_gsm8k,
+    evaluate_task_alpaca,
+    evaluate_safety,
+    eval_perplexity,
+    CLEAN_PROMPTS
 )
 from src.baselines_v2 import load_global_safety_direction
 from experiments.train_vanilla_v2 import MaskedTrainingDataset, training_collate_fn, set_seed, build_lora_model
@@ -206,12 +209,16 @@ def main():
                 alignments = compute_subspace_alignment_v2(model, v, target_layers)
                 mean_align = sum(alignments.values()) / len(alignments)
                 
+                clean_ppl = eval_perplexity(model, tokenizer, CLEAN_PROMPTS, device)
+                logger.info(f"Step {current_step} | Clean Perplexity: {clean_ppl:.4f}")
+
                 record = {
                     "step": current_step,
                     "train_loss": accumulated_loss / args.eval_every,
                     "refusal_rate": refusal_rate,
                     "baseline_refusal_rate": baseline_refusal_rate,
                     metric_name: task_metric,
+                    "clean_perplexity": clean_ppl,
                     "mean_alignment": mean_align,
                     "lambda_val": current_lambda
                 }
