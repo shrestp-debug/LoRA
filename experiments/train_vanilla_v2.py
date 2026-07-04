@@ -199,7 +199,7 @@ def main():
     models_dir.mkdir(exist_ok=True)
 
     csv_path = results_dir / f"vanilla_v2_{args.task}_seed{args.seed}.csv"
-adapter_save_dir = models_dir / f"vanilla_v2_{args.task}_seed{args.seed}"
+    adapter_save_dir = models_dir / f"vanilla_v2_{args.task}_seed{args.seed}"
 
     # Setup device
     device = "cuda" if torch.cuda.is_available() else "cpu"
