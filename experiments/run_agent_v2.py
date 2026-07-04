@@ -319,6 +319,15 @@ def main():
                         index=False
                     )
 
+                    # --- STEP 5: ADAM MOMENTUM RESET ---
+                    # SVD causes massive discontinuities in A/B factor matrices (norms > 5.0!). 
+                    # Stale momentum will violently throw weights off trajectory on the next step.
+                    for p in model.parameters():
+                        if p in optimizer.state:
+                            optimizer.state[p]['exp_avg'].zero_()
+                            optimizer.state[p]['exp_avg_sq'].zero_()
+                    logger.info("Reset Adam momentum states due to SVD factor discontinuities.")
+
                 reflexion_memory.add_pending(
                     step=current_step,
                     lambda_decisions=parsed["layer_constraints"],
