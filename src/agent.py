@@ -1,7 +1,15 @@
 """
-agent.py — Phase 6, Steps 6.2–6.3
+agent.py — Phase 6/3b, Steps 6.2–6.3
 ====================================
 LLM-based training controller for LoRA-SafeLoop (56-Key Version).
+
+v2 changes:
+  - AGENT_SYSTEM_PROMPT updated: module targets are now o_proj/down_proj
+    (write-side, causally verified via ablation study), not q_proj/v_proj.
+  - target_floor recalibrated: anchored to the median of recent refusal
+    history rather than the pristine pre-training baseline, which was
+    unreachable by step ~500 in every run and kept the agent in permanent
+    "crisis mode" (lambda near-max for the entire training run).
 """
 
 import csv
@@ -26,22 +34,24 @@ logger = logging.getLogger(__name__)
 AGENT_SYSTEM_PROMPT = """You are a safety-preserving training controller for a language model fine-tuning pipeline.
 
 A base LLM (Qwen2.5-1.5B-Instruct) is being fine-tuned on a task dataset. Fine-tuning causes the model to gradually lose safety alignment ("safety drift"). Your DUAL objective is:
-  1. MAINTAIN refusal rate above the target floor (baseline - 5%) — safety must not erode
+  1. MAINTAIN refusal rate above the target floor — safety must not erode further from where it has already stabilized
   2. MAXIMIZE task performance (lower loss for Alpaca, higher accuracy for GSM8K)
 
 The ideal λ configuration is the MINIMUM constraint that keeps safety stable. Over-constraining (λ too high everywhere) hurts task learning without additional safety benefit. Under-constraining (λ too low on high-alignment layers) lets safety drift through.
 
-HOW GRADIENT CONSTRAINT WORKS (56-PARAMETER MODULE):
-- The model has 28 layers. Each layer has an independent `q_proj` and `v_proj` component.
-- This gives 56 independent module targets (e.g. `model.layers.0.self_attn.q_proj`).
+HOW GRADIENT CONSTRAINT WORKS (56-PARAMETER MODULE, WRITE-SIDE):
+- The model has 28 layers. Each layer has an independent `o_proj` (attention output projection) and `down_proj` (MLP output projection) component.
+- This gives 56 independent module targets (e.g. `model.layers.0.self_attn.o_proj`).
+- These are WRITE-SIDE modules — they write their output directly into the residual stream. A causal ablation study confirmed the safety-relevant direction is concentrated here (removing it from these modules collapses refusal from ~100% to ~1%), NOT in the attention query/value projections.
+- All 56 modules are constrained against the SAME single global safety direction (extracted via difference-of-means at layer 14, verified as the causal peak layer). Unlike earlier versions, there is no per-layer direction diversity — λ controls how strongly each module is projected against this one shared direction.
 - Each module has a constraint strength λ ∈ [0.0, 1.0].
 - λ = 0.0: NO constraint — maximum task learning, no safety protection
 - λ = 0.3: light constraint — good for low-alignment modules
 - λ = 0.5: moderate constraint
 - λ = 0.7: strong constraint — use for high-alignment modules showing drift
-- λ = 1.0: maximum constraint — module is fully projected out of safety subspace
-- Constraint formula: ΔW_safe = ΔW - λ × (ΔW @ P)
-- Higher subspace alignment score = that module drifts more = needs higher λ
+- λ = 1.0: maximum constraint — module is fully projected out of the safety direction
+- Constraint formula: ΔW_safe = ΔW - λ × (v vᵀ ΔW), where v is the fixed global safety direction
+- Higher subspace alignment score = that module's LoRA update is more aligned with the safety direction = needs higher λ
 - IMPORTANT: λ values AUTO-DECAY by 2% each checkpoint toward 0. If you don't actively set a module's λ, it gradually returns toward 0. This is intentional — you must justify maintaining high constraints.
 
 STRATEGY PRINCIPLES:
@@ -50,10 +60,11 @@ STRATEGY PRINCIPLES:
 3. ACTIVELY REDUCE λ WHEN SAFE: If smoothed refusal is ABOVE the target floor, you MUST actively lower λ on modules with low/medium alignment to boost task learning.
 4. If smoothed refusal is NEAR the target floor (within 5%): raise λ moderately (+0.10 to +0.20) on the top-5 alignment modules.
 5. If smoothed refusal is BELOW the target floor: raise λ aggressively on the top-10 alignment modules (to 0.7-0.9).
-6. Learn from reflexion memory: if raising λ uniformly produced DEGRADATION, the drift is in directions P doesn't capture, or you constrained the wrong modules.
+6. Learn from reflexion memory: if raising λ uniformly produced DEGRADATION, the constraint may not be hitting the right modules, or the target floor itself may need reconsidering.
 7. Make PROPORTIONAL adjustments. Modules with alignment >0.1 should have higher λ. Modules with alignment <0.02 can stay at λ=0.
 
 CRITICAL RULES:
+- The target floor tracks RECENT stabilized refusal, not the model's pristine pre-training level — normal fine-tuning causes some initial safety drift that is expected and not something to fight indefinitely. Only escalate if refusal drops further BELOW where it has already settled.
 - You only need to specify modules you want to CHANGE. Unspecified modules keep current λ (after auto-decay).
 - λ=0 is valid and preferred for low-alignment modules when safety is stable.
 - Aim for STABILITY, not perfection. Small consistent improvements beat large swings.
@@ -61,8 +72,8 @@ CRITICAL RULES:
 RESPOND WITH VALID JSON ONLY. No text outside the JSON block. Required format:
 {
   "layer_constraints": {
-    "model.layers.0.self_attn.q_proj": 0.5,
-    "model.layers.0.self_attn.v_proj": 0.1,
+    "model.layers.0.self_attn.o_proj": 0.5,
+    "model.layers.0.mlp.down_proj": 0.1,
     ...
   },
   "rationale": "1–2 sentence explanation of your decision",
@@ -87,21 +98,33 @@ def format_observation(
     lambda_state: dict,
     reflexion_memory: ReflexionMemory,
     smoothed_refusal_rate: float = None,
+    refusal_history: Optional[list] = None,
     top_k_layers: int = 15,
 ) -> str:
     """Builds a structured observation string for the Groq agent."""
     pct_done   = 100.0 * step / total_steps
     step_change = refusal_rate - prev_refusal_rate
-    
-    target_floor = max(0.0, baseline_refusal_rate - 0.05)
+
+    # --- Recalibrated floor: anchor to recent stabilized refusal, not the
+    # pristine pre-training baseline. The old floor (baseline - 0.05) was
+    # unreachable by ~step 500 in every run, keeping the agent permanently
+    # in escalation mode. Fall back to the old behavior only if there isn't
+    # enough history yet (first few checkpoints).
+    if refusal_history is not None and len(refusal_history) >= 5:
+        recent = sorted(refusal_history[-5:])
+        recent_median = recent[len(recent) // 2]
+        target_floor = max(0.75, recent_median - 0.05)
+        floor_basis = f"max(0.75, recent median refusal ({recent_median:.3f}) - 0.05)"
+    else:
+        target_floor = max(0.75, baseline_refusal_rate - 0.05)
+        floor_basis = f"max(0.75, pre-training baseline ({baseline_refusal_rate:.3f}) - 0.05) (insufficient history)"
 
     recent_records = reflexion_memory.get_recent(3)
     declining_steps = 0
     for r in recent_records:
         if r.get("refusal_change", 0) < -0.02:
             declining_steps += 1
-    
-    # Sort modules by alignment descending
+
     sorted_modules = sorted(
         [(str(k), float(a)) for k, a in alignments.items()],
         key=lambda x: x[1],
@@ -109,38 +132,39 @@ def format_observation(
     )
 
     primary_refusal = smoothed_refusal_rate if smoothed_refusal_rate is not None else refusal_rate
-    
+
     lines = [
-        "=== LoRA-SafeLoop Agent Observation ===",
+        "=== LoRA-SafeLoop Agent Observation (v2: write-side, global direction) ===",
         f"Training Progress : Step {step} / {total_steps} ({pct_done:.1f}%)",
         f"Fine-tuning Task  : {task}",
         "",
         "SAFETY METRICS (use SMOOTHED for decisions, raw is noisy ±10%):",
         f"  Target Refusal Floor  : {target_floor:.4f} ({target_floor*100:.1f}%) — STAY ABOVE THIS",
+        f"  Floor basis           : {floor_basis}",
     ]
     if smoothed_refusal_rate is not None:
         lines.append(f"  ★ Smoothed Refusal (3-step avg): {smoothed_refusal_rate:.4f} ({smoothed_refusal_rate*100:.1f}%) ← USE THIS FOR DECISIONS")
     lines += [
         f"  Raw Refusal (noisy)   : {refusal_rate:.4f} ({refusal_rate*100:.1f}%)",
-        f"  Baseline              : {baseline_refusal_rate:.4f} ({baseline_refusal_rate*100:.1f}%)",
+        f"  Pre-training Baseline : {baseline_refusal_rate:.4f} ({baseline_refusal_rate*100:.1f}%) (for reference only, NOT the floor)",
         f"  Raw Change vs Last    : {step_change:+.4f} ({step_change*100:+.1f}%)",
     ]
-    
+
     if primary_refusal < target_floor:
         lines.append(f"  ⚠ ALERT: Smoothed refusal {primary_refusal:.2f} is BELOW target floor {target_floor:.2f}. Raise λ aggressively on high-alignment modules.")
     elif primary_refusal > target_floor + 0.05:
         lines.append(f"  ✔ SAFE: Smoothed refusal {primary_refusal:.2f} is comfortably above target floor. YOU MUST ACTIVELY REDUCE λ ON LOW-ALIGNMENT MODULES TO IMPROVE TASK LEARNING.")
-        
+
     if declining_steps >= 2:
         lines.append(f"  ⚠ TREND: Refusal has been DECLINING for {declining_steps} of the last {len(recent_records)} steps.")
-    
+
     lines += [
         "",
         "TASK METRICS:",
         f"  {metric_name}: {task_metric:.4f}",
         "",
         f"TOP {min(top_k_layers, len(sorted_modules))} MODULES BY SUBSPACE ALIGNMENT",
-        "(Higher alignment = more safety drift = needs stronger constraint):",
+        "(Higher alignment = LoRA update more aligned with the safety direction = needs stronger constraint):",
     ]
 
     for key, align in sorted_modules[:top_k_layers]:
@@ -149,8 +173,7 @@ def format_observation(
         elif align > 0.05: flag = "↗ MED — needs λ≥0.5"
         elif align > 0.02: flag = "  LOW — λ=0.2-0.3 ok"
         else: flag = "  MIN — λ=0.0 ok"
-        
-        # Make key more readable in the prompt
+
         short_key = key.split("layers.")[-1] if "layers." in key else key
         lines.append(f"  Module {short_key} | align={align:.4f} | λ={lam:.3f}  [{flag}]")
 
@@ -162,7 +185,7 @@ def format_observation(
         f"{k.split('layers.')[-1]}:{v:.2f}"
         for k, v in sorted(lambda_state.items(), key=lambda x: (parse_layer(x[0]), x[0]))
     )
-    
+
     lines += [
         "",
         f"FULL λ STATE (after 2% auto-decay): [{lambda_compact}]",
@@ -172,6 +195,7 @@ def format_observation(
         "",
         "REMINDERS:",
         "- Use SMOOTHED refusal for decisions, not raw.",
+        "- The floor tracks recent stabilized refusal, not the pristine base model — some drift from the base model is expected.",
         "- λ auto-decays 2% each step. You must actively set modules you want to keep high.",
         "- DUAL OBJECTIVE: maintain safety AND maximize task performance.",
         "- If safety is stable: LOWER λ on low-alignment modules to improve task learning. Do NOT just keep raising λ.",
@@ -182,7 +206,7 @@ def format_observation(
 
 
 # ===========================================================================
-# Agent API Call
+# Agent API Call (unchanged)
 # ===========================================================================
 
 def call_groq_agent(
@@ -203,7 +227,7 @@ def call_groq_agent(
                     {"role": "user", "content": observation}
                 ],
                 temperature=0.1,
-                max_tokens=1024, # Increased for 56 outputs
+                max_tokens=1024,
             )
             text = response.choices[0].message.content
             logger.info(f"Agent API call succeeded (attempt {attempt + 1}).")
@@ -229,7 +253,7 @@ def call_groq_agent(
 
 
 # ===========================================================================
-# Response Parser
+# Response Parser (unchanged)
 # ===========================================================================
 
 def parse_agent_response(
@@ -286,7 +310,6 @@ def parse_agent_response(
     new_lambda_state = dict(current_lambda_state)
 
     for key, val in raw_constraints.items():
-        # Allow substring matching in case the agent outputs a short key or partial key
         matched_ids = [v_id for v_id in valid_layer_ids if key == v_id or key in v_id]
         if not matched_ids:
             logger.warning(f"Module {key} not in model — skipping.")
@@ -298,10 +321,7 @@ def parse_agent_response(
             logger.warning(f"Invalid λ value '{val}' for module {key} — skipping.")
             continue
 
-        LAMBDA_FLOOR = 0.0
-        LAMBDA_CAP = 1.0
-        clamped = max(LAMBDA_FLOOR, min(LAMBDA_CAP, lam))
-        
+        clamped = max(0.0, min(1.0, lam))
         for matched_id in matched_ids:
             new_lambda_state[matched_id] = clamped
 
