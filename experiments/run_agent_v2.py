@@ -28,6 +28,7 @@ from src.metrics import (
     evaluate_task_alpaca,
     evaluate_safety,
     eval_perplexity,
+    log_sample_generations,
     CLEAN_PROMPTS
 )
 from src.baselines_v2 import load_global_safety_direction
@@ -315,12 +316,6 @@ def main():
                 applier.set_all_lambdas(parsed["layer_constraints"])
                 applier.apply_projection()
 
-                jump_log = applier.get_svd_jump_log()
-                if jump_log:
-                    pd.DataFrame(jump_log).to_csv(
-                        results_dir / f"agent_v2_{args.task}_seed{args.seed}_svdjumps_step{current_step}.csv",
-                        index=False
-                    )
 
                 reflexion_memory.add_pending(
                     step=current_step,
@@ -334,6 +329,7 @@ def main():
 
                 clean_ppl = eval_perplexity(model, tokenizer, CLEAN_PROMPTS, device)
                 logger.info(f"Step {current_step} | Clean Perplexity: {clean_ppl:.4f}")
+                log_sample_generations(model, tokenizer, CLEAN_PROMPTS, device, n=2)
 
                 record = {
                     "step": current_step,

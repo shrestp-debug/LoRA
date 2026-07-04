@@ -43,33 +43,9 @@ class ConstraintApplierV2:
                 continue
             
             with torch.no_grad():
-                A = target.lora_A["default"].weight.detach().to(torch.float32)
                 B = target.lora_B["default"].weight.detach().to(torch.float32)
-                scaling = target.scaling.get("default", 1.0)
-                delta_W = (B @ A) * scaling
-                
-                # Write-side projection using the global vector v
-                proj = torch.outer(self.v, self.v @ delta_W)
-                delta_W_safe = delta_W - lam * proj
-                
-                target_w = (delta_W_safe.float()) / scaling
-                
-                # Least-squares update for B keeping A fixed
-                B_new = target_w @ torch.linalg.pinv(A.float())
-                
-                delta_B = torch.norm(B_new - B).item()
-                if not hasattr(self, "_svd_jump_log"):
-                    self._svd_jump_log = []
-                self._svd_jump_log.append({
-                    "step": None,
-                    "key": key,
-                    "lambda": lam,
-                    "delta_B_norm": delta_B
-                })
-
+                proj = torch.outer(self.v, self.v @ B)
+                B_new = B - lam * proj
                 target.lora_B["default"].weight.data.copy_(B_new.to(target.lora_B["default"].weight.dtype))
             n_applied += 1
         return n_applied
-
-    def get_svd_jump_log(self):
-        return getattr(self, "_svd_jump_log", [])

@@ -40,7 +40,7 @@ from src.dataset_loader import (
     load_alpaca_val,
     load_advbench
 )
-from src.metrics import evaluate_task_gsm8k, evaluate_task_alpaca, evaluate_safety, eval_perplexity, CLEAN_PROMPTS
+from src.metrics import evaluate_task_gsm8k, evaluate_task_alpaca, evaluate_safety, eval_perplexity, log_sample_generations, CLEAN_PROMPTS
 from src.baselines_v2 import (
     apply_write_side_hook_constraint,
     apply_safelora_projection_persistent,
@@ -184,6 +184,7 @@ def main():
 
                 clean_ppl = eval_perplexity(model, tokenizer, CLEAN_PROMPTS, device)
                 logger.info(f"Step {current_step} | Clean Perplexity: {clean_ppl:.4f}")
+                log_sample_generations(model, tokenizer, CLEAN_PROMPTS, device, n=2)
 
                 record = {
                     "step": current_step,

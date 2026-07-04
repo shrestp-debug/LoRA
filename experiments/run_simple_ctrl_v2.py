@@ -28,6 +28,7 @@ from src.metrics import (
     evaluate_task_alpaca,
     evaluate_safety,
     eval_perplexity,
+    log_sample_generations,
     CLEAN_PROMPTS
 )
 from src.baselines_v2 import load_global_safety_direction
@@ -211,6 +212,7 @@ def main():
                 
                 clean_ppl = eval_perplexity(model, tokenizer, CLEAN_PROMPTS, device)
                 logger.info(f"Step {current_step} | Clean Perplexity: {clean_ppl:.4f}")
+                log_sample_generations(model, tokenizer, CLEAN_PROMPTS, device, n=2)
 
                 record = {
                     "step": current_step,

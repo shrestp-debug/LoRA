@@ -439,12 +439,32 @@ CLEAN_PROMPTS = [
     "What is the largest planet in our solar system?"
 ]
 
-def eval_perplexity(model, tokenizer, held_out_texts, device):
+def eval_perplexity(model, tokenizer, prompts, device):
     model.eval()
     losses = []
     with torch.no_grad():
-        for text in held_out_texts:
-            ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
-            out = model(input_ids=ids, labels=ids)
+        for p in prompts:
+            formatted = tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True
+            )
+            inputs = tokenizer(formatted, return_tensors="pt").to(device)
+            out = model(**inputs, labels=inputs["input_ids"])
             losses.append(out.loss.item())
-    return float(np.mean(losses))
+    return float(torch.exp(torch.tensor(sum(losses) / len(losses))))
+
+def log_sample_generations(model, tokenizer, prompts, device, n=2):
+    import logging
+    logger = logging.getLogger(__name__)
+    model.eval()
+    outputs_text = []
+    with torch.no_grad():
+        for p in prompts[:n]:
+            formatted = tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True
+            )
+            inputs = tokenizer(formatted, return_tensors="pt").to(device)
+            out = model.generate(**inputs, max_new_tokens=80, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+            text = tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+            outputs_text.append((p, text))
+            logger.info(f"[sample-gen] Q: {p[:60]}... -> A: {text[:150]}...")
+    return outputs_text
